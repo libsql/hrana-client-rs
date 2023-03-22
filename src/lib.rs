@@ -41,6 +41,8 @@ impl Client {
             .context("Receiving HelloOk failed")??;
         let client_receiver_handles = Arc::new(Mutex::new(HashMap::<i32, ClientReceiver>::new()));
         let server_sender_handles = Arc::new(Mutex::new(HashMap::<i32, ServerSender>::new()));
+        // Maps request ids to their stream id. Note: if Hrana would return the stream id
+        // in the server's response, we could remove this map and take the stream id straight from the response.
         let request_id_to_stream = Arc::new(std::sync::Mutex::new(HashMap::<i32, i32>::new()));
         let notify = Arc::new(tokio::sync::Notify::new());
 
