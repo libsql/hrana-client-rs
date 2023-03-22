@@ -17,6 +17,7 @@ type ServerSender = tokio::sync::mpsc::Sender<proto::ServerMsg>;
 pub struct Client {
     client_receiver_handles: Arc<Mutex<HashMap<i32, ClientReceiver>>>,
     server_sender_handles: Arc<Mutex<HashMap<i32, ServerSender>>>,
+    notify: Arc<tokio::sync::Notify>,
     _writer_handle: futures::future::RemoteHandle<Result<()>>,
     _reader_handle: futures::future::RemoteHandle<Result<()>>,
 }
@@ -41,11 +42,13 @@ impl Client {
         let client_receiver_handles = Arc::new(Mutex::new(HashMap::<i32, ClientReceiver>::new()));
         let server_sender_handles = Arc::new(Mutex::new(HashMap::<i32, ServerSender>::new()));
         let request_id_to_stream = Arc::new(std::sync::Mutex::new(HashMap::<i32, i32>::new()));
+        let notify = Arc::new(tokio::sync::Notify::new());
 
         let (writer_task, _writer_handle) = Self::run_writer(
             write_half,
             client_receiver_handles.clone(),
             request_id_to_stream.clone(),
+            notify.clone(),
         )
         .remote_handle();
 
@@ -62,6 +65,7 @@ impl Client {
         let client = Self {
             client_receiver_handles,
             server_sender_handles,
+            notify,
             _writer_handle,
             _reader_handle,
         };
@@ -73,14 +77,13 @@ impl Client {
         mut write_half: futures::stream::SplitSink<WebSocketStream, tungstenite::Message>,
         client_receiver_handles: Arc<Mutex<HashMap<i32, ClientReceiver>>>,
         request_id_to_stream: Arc<std::sync::Mutex<HashMap<i32, i32>>>,
+        notify: Arc<tokio::sync::Notify>,
     ) -> Result<()> {
         loop {
             // The lock is expected not to be contended, except for open_stream(), which is supposed to be rare
             let mut receiver_handles = client_receiver_handles.lock().await;
             for (stream_id, receiver_handle) in receiver_handles.iter_mut() {
-                // FIXME: select (via FuturesUnordered maybe?) instead of try_recv,
-                // or wait on some condition variable until *any* message arrives.
-                // Otherwise we effectively busy-loop here.
+                // Note: we loop through all streams here, but we'll sleep on `notify` if there's nothing to do
                 if let Ok(msg) = receiver_handle.try_recv() {
                     tracing::debug!("Sending message: {msg:?}");
                     let request_id = if let proto::ClientMsg::Request { request_id, .. } = &msg {
@@ -97,6 +100,7 @@ impl Client {
                     write_half.send(Self::serialize_msg(&msg)?).await?;
                 }
             }
+            notify.notified().await;
         }
     }
 
@@ -160,6 +164,7 @@ impl Client {
             stream_id,
             to_server_sender,
             from_server_receiver,
+            self.notify.clone(),
         ))
     }
 
@@ -181,6 +186,7 @@ pub struct Stream {
     next_request_id: i32,
     to_server_sender: tokio::sync::mpsc::Sender<proto::ClientMsg>,
     from_server_receiver: tokio::sync::mpsc::Receiver<proto::ServerMsg>,
+    notify: Arc<tokio::sync::Notify>,
 }
 
 impl Stream {
@@ -188,12 +194,14 @@ impl Stream {
         stream_id: i32,
         to_server_sender: tokio::sync::mpsc::Sender<proto::ClientMsg>,
         from_server_receiver: tokio::sync::mpsc::Receiver<proto::ServerMsg>,
+        notify: Arc<tokio::sync::Notify>,
     ) -> Self {
         Self {
             id: stream_id,
             next_request_id: 1,
             to_server_sender,
             from_server_receiver,
+            notify,
         }
     }
 
@@ -218,6 +226,7 @@ impl Stream {
             }),
         };
         self.to_server_sender.send(req).await?;
+        self.notify.notify_one();
         let resp = self
             .from_server_receiver
             .recv()
