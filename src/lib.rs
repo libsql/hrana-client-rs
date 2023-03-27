@@ -1,4 +1,5 @@
 pub use crate::stream::Stream;
+pub use crate::conn::HranaConnFut as ConnFut;
 pub use client::Client;
 
 mod client;
