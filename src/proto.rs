@@ -101,7 +101,7 @@ pub struct NamedArg {
     pub value: Value,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Clone, Debug)]
 pub struct StmtResult {
     pub cols: Vec<Col>,
     pub rows: Vec<Vec<Value>>,
@@ -110,12 +110,12 @@ pub struct StmtResult {
     pub last_insert_rowid: Option<i64>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Clone, Debug)]
 pub struct Col {
     pub name: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Value {
     Null,
@@ -262,3 +262,69 @@ mod bytes_as_base64 {
             })
     }
 }
+
+impl From<()> for Value {
+    fn from(_: ()) -> Value {
+        Value::Null
+    }
+}
+
+macro_rules! impl_from_value {
+    ($typename: ty, $variant: ident) => {
+        impl From<$typename> for Value {
+            fn from(t: $typename) -> Value {
+                Value::$variant { value: t.into() }
+            }
+        }
+    };
+}
+
+impl_from_value!(String, Text);
+impl_from_value!(&String, Text);
+impl_from_value!(&str, Text);
+
+impl_from_value!(i8, Integer);
+impl_from_value!(i16, Integer);
+impl_from_value!(i32, Integer);
+impl_from_value!(i64, Integer);
+
+impl_from_value!(u8, Integer);
+impl_from_value!(u16, Integer);
+impl_from_value!(u32, Integer);
+
+impl_from_value!(f32, Float);
+impl_from_value!(f64, Float);
+
+impl_from_value!(Vec<u8>, Blob);
+
+macro_rules! impl_value_try_from {
+    ($variant: ident, $typename: ty) => {
+        impl TryFrom<Value> for $typename {
+            type Error = String;
+            fn try_from(v: Value) -> Result<$typename, Self::Error> {
+                match v {
+                    Value::$variant { value: v } => v.try_into().map_err(|e| format!("{e}")),
+                    other => Err(format!(
+                        "cannot transform {other:?} to {}",
+                        stringify!($variant)
+                    )),
+                }
+            }
+        }
+    };
+}
+
+impl_value_try_from!(Text, String);
+
+impl_value_try_from!(Integer, i8);
+impl_value_try_from!(Integer, i16);
+impl_value_try_from!(Integer, i32);
+impl_value_try_from!(Integer, i64);
+impl_value_try_from!(Integer, u8);
+impl_value_try_from!(Integer, u16);
+impl_value_try_from!(Integer, u32);
+impl_value_try_from!(Integer, u64);
+
+impl_value_try_from!(Float, f64);
+
+impl_value_try_from!(Blob, Vec<u8>);
