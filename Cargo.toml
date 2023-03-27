@@ -1,6 +1,6 @@
 [package]
 name = "hrana-client"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Hrana client for libSQL and sqld"
@@ -18,6 +18,7 @@ serde_json = "1.0.94"
 thiserror = "1.0.40"
 tokio = { version = "1.22.2", features = ["net", "sync", "rt", "macros"] }
 tokio-tungstenite = "0.18"
+hrana-client-proto = { version = "0", path = "./hrana-client-proto" }
 
 [dev-dependencies]
 tokio = { version = "1.22.2", features = ["rt-multi-thread"] }
@@ -25,3 +26,6 @@ tokio = { version = "1.22.2", features = ["rt-multi-thread"] }
 [[example]]
 name = "basic"
 path = "examples/basic.rs"
+
+[workspace]
+members = ["hrana-client-proto"]

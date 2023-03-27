@@ -1,0 +1,16 @@
+[package]
+name = "hrana-client-proto"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Hrana client protocol for libSQL and sqld"
+keywords = ["libsql", "sqld", "database", "driver", "hrana"]
+repository = "https://github.com/libsql/hrana-client-rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.70"
+base64 = "0.21.0"
+serde = { version = "1.0.158", features = ["derive"] }
+serde_json = "1.0.94"
