@@ -1,16 +1,18 @@
 //! Messages in the Hrana protocol.
 //!
 //! Please consult the Hrana specification in the `docs/` directory for more information.
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Serialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
     Hello { jwt: Option<String> },
     Request { request_id: i32, request: Request },
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMsg {
     HelloOk {},
@@ -19,50 +21,52 @@ pub enum ServerMsg {
     ResponseError { request_id: i32, error: Error },
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Serialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     OpenStream(OpenStreamReq),
-    CloseStream(OpenStreamReq),
+    CloseStream(CloseStreamReq),
     Execute(ExecuteReq),
+    Batch(BatchReq),
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
     OpenStream(OpenStreamResp),
     CloseStream(CloseStreamResp),
     Execute(ExecuteResp),
+    Batch(BatchResp),
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Serialize, Debug)]
 pub struct OpenStreamReq {
     pub stream_id: i32,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Debug)]
 pub struct OpenStreamResp {}
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Serialize, Debug)]
 pub struct CloseStreamReq {
     pub stream_id: i32,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Debug)]
 pub struct CloseStreamResp {}
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Serialize, Debug)]
 pub struct ExecuteReq {
     pub stream_id: i32,
     pub stmt: Stmt,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Debug)]
 pub struct ExecuteResp {
     pub result: StmtResult,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Serialize, Debug)]
 pub struct Stmt {
     pub sql: String,
     #[serde(default)]
@@ -72,13 +76,32 @@ pub struct Stmt {
     pub want_rows: bool,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+impl Stmt {
+    pub fn new(sql: String, want_rows: bool) -> Self {
+        Self {
+            sql,
+            want_rows,
+            named_args: Vec::new(),
+            args: Vec::new(),
+        }
+    }
+
+    pub fn bind(&mut self, val: Value) {
+        self.args.push(val);
+    }
+
+    pub fn bind_named(&mut self, name: String, value: Value) {
+        self.named_args.push(NamedArg { name, value });
+    }
+}
+
+#[derive(Serialize, Debug)]
 pub struct NamedArg {
     pub name: String,
     pub value: Value,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Debug)]
 pub struct StmtResult {
     pub cols: Vec<Col>,
     pub rows: Vec<Vec<Value>>,
@@ -87,7 +110,7 @@ pub struct StmtResult {
     pub last_insert_rowid: Option<i64>,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Debug)]
 pub struct Col {
     pub name: Option<String>,
 }
@@ -112,10 +135,77 @@ pub enum Value {
     },
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Serialize, Debug)]
+pub struct BatchReq {
+    pub stream_id: i32,
+    pub batch: Batch,
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct Batch {
+    steps: Vec<BatchStep>,
+}
+
+impl Batch {
+    pub fn new() -> Self {
+        Self { steps: Vec::new() }
+    }
+
+    pub fn step(&mut self, condition: Option<BatchCond>, stmt: Stmt) {
+        self.steps.push(BatchStep { condition, stmt });
+    }
+}
+
+#[derive(Serialize, Debug)]
+pub struct BatchStep {
+    condition: Option<BatchCond>,
+    stmt: Stmt,
+}
+
+#[derive(Serialize, Debug)]
+pub enum BatchCond {
+    Ok { step: i32 },
+    Error { step: i32 },
+    Not { cond: Box<BatchCond> },
+    And { conds: Vec<BatchCond> },
+    Or { conds: Vec<BatchCond> },
+}
+
+#[derive(Deserialize, Debug)]
+pub struct BatchResp {
+    pub result: BatchResult,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct BatchResult {
+    pub step_results: Vec<Option<StmtResult>>,
+    pub step_errors: Vec<Option<Error>>,
+}
+
+impl<T> From<Option<T>> for Value
+where
+    T: Into<Value>,
+{
+    fn from(value: Option<T>) -> Self {
+        match value {
+            None => Self::Null,
+            Some(t) => t.into(),
+        }
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct Error {
     pub message: String,
 }
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Error {}
 
 mod i64_as_str {
     use serde::{de, ser};
@@ -137,11 +227,7 @@ mod i64_as_str {
 }
 
 mod option_i64_as_str {
-    use serde::{de, de::Error as _, ser, Serialize as _};
-
-    pub fn serialize<S: ser::Serializer>(value: &Option<i64>, ser: S) -> Result<S::Ok, S::Error> {
-        value.map(|v| v.to_string()).serialize(ser)
-    }
+    use serde::{de, de::Error as _};
 
     pub fn deserialize<'de, D: de::Deserializer<'de>>(de: D) -> Result<Option<i64>, D::Error> {
         let str_value = <Option<&'de str> as de::Deserialize>::deserialize(de)?;
