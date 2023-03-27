@@ -263,6 +263,22 @@ mod bytes_as_base64 {
     }
 }
 
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Null => write!(f, "null"),
+            Value::Integer { value: n } => write!(f, "{n}"),
+            Value::Float { value: d } => write!(f, "{d}"),
+            Value::Text { value: s } => write!(f, "{}", serde_json::json!(s)),
+            Value::Blob { value: b } => {
+                use base64::{prelude::BASE64_STANDARD_NO_PAD, Engine};
+                let b = BASE64_STANDARD_NO_PAD.encode(b);
+                write!(f, "{{\"base64\": {b}}}")
+            }
+        }
+    }
+}
+
 impl From<()> for Value {
     fn from(_: ()) -> Value {
         Value::Null
