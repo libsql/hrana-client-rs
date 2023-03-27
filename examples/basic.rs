@@ -7,7 +7,7 @@ use hrana_client::{
 async fn main() {
     // Open a `hrana.Client`, which works like a connection pool in standard SQL
     // databases, but it uses just a single network connection internally
-    let url = std::env::var("URL").unwrap_or_else(|_| String::from("localhost:2023"));
+    let url = std::env::var("URL").unwrap_or_else(|_| String::from("ws://localhost:2023"));
     let jwt = std::env::var("JWT").unwrap_or_default();
     let (client, fut) = Client::connect(&url, Some(jwt)).await.unwrap();
 
