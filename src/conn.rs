@@ -124,7 +124,7 @@ impl HranaConn {
                     self.handle_op(op).await?;
                 },
                 Some(msg) = self.ws.next() => {
-                    self.handle_socket_msg(msg?)?;
+                    self.handle_socket_msg(msg?).await?;
                 },
                 else => break,
             }
@@ -266,7 +266,7 @@ impl HranaConn {
         (ret)(&mut self.state, response)
     }
 
-    fn handle_socket_msg(&mut self, socket_msg: Message) -> Result<()> {
+    async fn handle_socket_msg(&mut self, socket_msg: Message) -> Result<()> {
         match socket_msg {
             Message::Text(json) => {
                 let server_msg: ServerMsg =
@@ -288,6 +288,10 @@ impl HranaConn {
             Message::Close(_) => {
                 return Err(Error::Shutdown);
             }
+            Message::Ping(_) => {
+                self.ws.send(Message::Pong(Vec::new())).await?;
+            }
+            Message::Pong(_) => (),
             _ => return Err(Error::InvalidServerMessage),
         }
 
