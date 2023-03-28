@@ -77,7 +77,8 @@ pub struct Stmt {
 }
 
 impl Stmt {
-    pub fn new(sql: String, want_rows: bool) -> Self {
+    pub fn new(sql: impl Into<String>, want_rows: bool) -> Self {
+        let sql = sql.into();
         Self {
             sql,
             want_rows,
