@@ -22,12 +22,9 @@ impl Client {
         let (ret, recv) = oneshot::channel();
         let op = Op::OpenStream { ret };
         self.conn_sender.send(op).map_err(|_| Error::Shutdown)?;
-        let stream_id = recv.await.map_err(|_| Error::Shutdown)?;
+        let stream = recv.await.map_err(|_| Error::Shutdown)?;
 
-        Ok(Stream {
-            stream_id,
-            conn_sender: self.conn_sender.clone(),
-        })
+        Ok(stream)
     }
 
     /// Client shutdown.
