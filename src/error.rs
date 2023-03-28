@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tokio_tungstenite::tungstenite;
 
 use crate::proto;
@@ -16,8 +18,8 @@ pub enum Error {
     BadResponse,
     #[error("client shutdown")]
     Shutdown,
-    #[error("websocket error: {0}")]
-    WebSocket(String),
+    #[error(transparent)]
+    WebSocket(Arc<tungstenite::Error>),
     #[error("received invalid message from server")]
     InvalidServerMessage,
     #[error("internal error: {0}")]
@@ -32,7 +34,7 @@ pub enum Error {
 
 impl From<tungstenite::Error> for Error {
     fn from(error: tungstenite::Error) -> Self {
-        Self::WebSocket(error.to_string())
+        Self::WebSocket(Arc::new(error))
     }
 }
 
