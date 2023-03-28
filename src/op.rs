@@ -9,22 +9,22 @@ pub(crate) enum Op {
         ret: oneshot::Sender<Stream>,
     },
     Execute {
-        stmt: Stmt,
         ret: oneshot::Sender<Result<StmtResult>>,
         stream_id: i32,
+        stmt: Stmt,
     },
     ExecuteBatch {
-        batch: Batch,
         ret: oneshot::Sender<Result<BatchResult>>,
         stream_id: i32,
+        batch: Batch,
     },
     WaitStreamOpen {
         ret: oneshot::Sender<Result<()>>,
         stream_id: i32,
     },
     CloseStream {
-        stream_id: i32,
         ret: oneshot::Sender<Result<()>>,
+        stream_id: i32,
     },
     Shutdown {
         ret: oneshot::Sender<()>,
