@@ -24,7 +24,7 @@ type WebSocketStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStre
 type WsSink = SplitSink<WebSocketStream, tungstenite::Message>;
 type WsStream = SplitStream<WebSocketStream>;
 type HandleResponseCallback =
-    Box<dyn FnOnce(&mut HranaConnState, Result<proto::Response>) + Sync + Send>;
+    Box<dyn FnOnce(&mut HranaConnState, Result<proto::Response>) -> Result<()> + Sync + Send>;
 
 enum StreamState {
     Open,
@@ -162,6 +162,8 @@ impl HranaConn {
             conn_sender: self.sender(),
         };
 
+        let _ = ret.send(stream);
+
         self.state.streams.insert(
             stream_id,
             StreamState::Opening {
@@ -172,37 +174,36 @@ impl HranaConn {
         self.state.requests.insert(
             request_id,
             Box::new(move |state, resp| {
-                if let Some(state) = state.streams.get_mut(&stream_id) {
-                    *state = match state {
-                        StreamState::Opening { waiters } => match resp {
-                            Ok(proto::Response::OpenStream(_)) => {
-                                for waiter in waiters.drain(..) {
-                                    let _ = waiter.send(Ok(()));
-                                }
-                                StreamState::Open
+                let Some(state) = state.streams.get_mut(&stream_id) else { return Err(Error::StreamDoesNotExist)};
+                *state = match state {
+                    StreamState::Opening { waiters } => match resp {
+                        Ok(proto::Response::OpenStream(_)) => {
+                            for waiter in waiters.drain(..) {
+                                let _ = waiter.send(Ok(()));
                             }
-                            Ok(_) => {
-                                for waiter in waiters.drain(..) {
-                                    let _ = waiter.send(Err(Error::BadResponse));
-                                }
-                                StreamState::Closed
-                            }
-                            Err(e) => {
-                                for waiter in waiters.drain(..) {
-                                    let _ = waiter.send(Err(e.clone()));
-                                }
-                                StreamState::Closed
-                            }
-                        },
-                        StreamState::Closed | StreamState::Open => {
-                            unreachable!("invalid state")
+                            StreamState::Open
                         }
+                        Ok(_) => {
+                            for waiter in waiters.drain(..) {
+                                let _ = waiter.send(Err(Error::BadResponse));
+                            }
+                            StreamState::Closed
+                        }
+                        Err(e) => {
+                            for waiter in waiters.drain(..) {
+                                let _ = waiter.send(Err(e.clone()));
+                            }
+                            StreamState::Closed
+                        }
+                    },
+                    StreamState::Closed | StreamState::Open => {
+                        return Err(Error::InvalidState)
                     }
-                }
+                };
+
+                Ok(())
             }),
         );
-
-        let _ = ret.send(stream);
 
         Ok(())
     }
@@ -262,10 +263,7 @@ impl HranaConn {
             .remove(&request_id)
             .ok_or(Error::RequestDoesNotExist)?;
 
-        self.state.id_allocator.free(request_id);
-        (ret)(&mut self.state, response);
-
-        Ok(())
+        (ret)(&mut self.state, response)
     }
 
     fn handle_socket_msg(&mut self, socket_msg: Message) -> Result<()> {
@@ -303,7 +301,8 @@ impl HranaConn {
 
         let requests = std::mem::take(&mut self.state.requests);
         for (_, resp) in requests.into_iter() {
-            (resp)(&mut self.state, Err(error.clone()))
+            // ignore the error, at this point we're already shutting down...
+            let _ = (resp)(&mut self.state, Err(error.clone()));
         }
     }
 
@@ -338,6 +337,8 @@ impl HranaConn {
                 };
 
                 let _ = ret.send(res);
+
+                Ok(())
             }),
         );
 
@@ -374,6 +375,8 @@ impl HranaConn {
                 state.id_allocator.free(stream_id);
                 let res = resp.map(|_| ());
                 let _ = ret.send(res);
+
+                Ok(())
             }),
         );
 
@@ -425,6 +428,8 @@ impl HranaConn {
                 };
 
                 let _ = ret.send(res);
+
+                Ok(())
             }),
         );
 

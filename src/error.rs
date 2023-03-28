@@ -26,6 +26,8 @@ pub enum Error {
     InvalidUrl(String),
     #[error("received response does not match any request")]
     RequestDoesNotExist,
+    #[error("connection state is invalid")]
+    InvalidState,
 }
 
 impl From<tungstenite::Error> for Error {
