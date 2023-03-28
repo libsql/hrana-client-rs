@@ -2,10 +2,11 @@ use tokio::sync::oneshot;
 
 use crate::error::Result;
 use crate::proto::{Batch, BatchResult, Stmt, StmtResult};
+use crate::Stream;
 
 pub(crate) enum Op {
     OpenStream {
-        ret: oneshot::Sender<i32>,
+        ret: oneshot::Sender<Stream>,
     },
     Execute {
         stmt: Stmt,

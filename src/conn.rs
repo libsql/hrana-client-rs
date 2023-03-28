@@ -18,6 +18,7 @@ use crate::op::Op;
 use crate::proto::{
     self, ClientMsg, CloseStreamReq, OpenStreamReq, Response, ServerMsg, Stmt, StmtResult,
 };
+use crate::Stream;
 
 type WebSocketStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WebSocketStream, tungstenite::Message>;
@@ -65,7 +66,8 @@ pub(crate) async fn spawn_hrana_conn(
     url: &str,
     jwt: Option<String>,
 ) -> Result<(mpsc::UnboundedSender<Op>, HranaConnFut)> {
-    let (mut conn, sender) = HranaConn::connect(url, jwt).await?;
+    let mut conn = HranaConn::connect(url, jwt).await?;
+    let sender = conn.sender();
     let handle = tokio::spawn(async move {
         match conn.run().await {
             Ok(_) => conn.shutdown(Error::Shutdown),
@@ -83,6 +85,7 @@ struct HranaConn {
     stream: WsStream,
     state: HranaConnState,
     receiver: mpsc::UnboundedReceiver<Op>,
+    sender: mpsc::UnboundedSender<Op>,
 }
 
 fn get_ws_config() -> tungstenite::protocol::WebSocketConfig {
@@ -93,10 +96,7 @@ fn get_ws_config() -> tungstenite::protocol::WebSocketConfig {
 }
 
 impl HranaConn {
-    pub(crate) async fn connect(
-        url: &str,
-        jwt: Option<String>,
-    ) -> Result<(Self, mpsc::UnboundedSender<Op>)> {
+    pub(crate) async fn connect(url: &str, jwt: Option<String>) -> Result<Self> {
         let mut request = url.into_client_request()?;
         request
             .headers_mut()
@@ -111,11 +111,16 @@ impl HranaConn {
             stream,
             state: HranaConnState::default(),
             receiver,
+            sender,
         };
 
         this.send_client_message(&ClientMsg::Hello { jwt }).await?;
 
-        Ok((this, sender))
+        Ok(this)
+    }
+
+    fn sender(&self) -> mpsc::UnboundedSender<Op> {
+        self.sender.clone()
     }
 
     async fn run(&mut self) -> Result<()> {
@@ -141,7 +146,7 @@ impl HranaConn {
         Ok(())
     }
 
-    async fn handle_op_create_stream(&mut self, ret: oneshot::Sender<i32>) -> Result<()> {
+    async fn handle_op_create_stream(&mut self, ret: oneshot::Sender<Stream>) -> Result<()> {
         // TODO: better id allocation
         let stream_id = self.state.id_allocator.allocate();
         let request_id = self.state.id_allocator.allocate();
@@ -152,51 +157,52 @@ impl HranaConn {
         };
 
         self.send_client_message(&msg).await?;
+        let stream = Stream {
+            stream_id,
+            conn_sender: self.sender(),
+        };
 
-        if ret.send(stream_id).is_ok() {
-            self.state.streams.insert(
-                stream_id,
-                StreamState::Opening {
-                    waiters: Vec::new(),
-                },
-            );
+        self.state.streams.insert(
+            stream_id,
+            StreamState::Opening {
+                waiters: Vec::new(),
+            },
+        );
 
-            self.state.requests.insert(
-                request_id,
-                Box::new(move |state, resp| {
-                    if let Some(state) = state.streams.get_mut(&stream_id) {
-                        *state = match state {
-                            StreamState::Opening { waiters } => match resp {
-                                Ok(proto::Response::OpenStream(_)) => {
-                                    for waiter in waiters.drain(..) {
-                                        let _ = waiter.send(Ok(()));
-                                    }
-                                    StreamState::Open
+        self.state.requests.insert(
+            request_id,
+            Box::new(move |state, resp| {
+                if let Some(state) = state.streams.get_mut(&stream_id) {
+                    *state = match state {
+                        StreamState::Opening { waiters } => match resp {
+                            Ok(proto::Response::OpenStream(_)) => {
+                                for waiter in waiters.drain(..) {
+                                    let _ = waiter.send(Ok(()));
                                 }
-                                Ok(_) => {
-                                    for waiter in waiters.drain(..) {
-                                        let _ = waiter.send(Err(Error::BadResponse));
-                                    }
-                                    StreamState::Closed
-                                }
-                                Err(e) => {
-                                    for waiter in waiters.drain(..) {
-                                        let _ = waiter.send(Err(e.clone()));
-                                    }
-                                    StreamState::Closed
-                                }
-                            },
-                            StreamState::Closed | StreamState::Open => {
-                                unreachable!("invalid state")
+                                StreamState::Open
                             }
+                            Ok(_) => {
+                                for waiter in waiters.drain(..) {
+                                    let _ = waiter.send(Err(Error::BadResponse));
+                                }
+                                StreamState::Closed
+                            }
+                            Err(e) => {
+                                for waiter in waiters.drain(..) {
+                                    let _ = waiter.send(Err(e.clone()));
+                                }
+                                StreamState::Closed
+                            }
+                        },
+                        StreamState::Closed | StreamState::Open => {
+                            unreachable!("invalid state")
                         }
                     }
-                }),
-            );
-        } else {
-            self.state.id_allocator.free(stream_id);
-            self.state.id_allocator.free(request_id);
-        }
+                }
+            }),
+        );
+
+        let _ = ret.send(stream);
 
         Ok(())
     }
