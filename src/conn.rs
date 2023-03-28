@@ -249,18 +249,17 @@ impl HranaConn {
         Ok(())
     }
 
-    fn handle_response_ok(&mut self, request_id: i32, response: Response) {
-        if let Some(ret) = self.state.requests.remove(&request_id) {
-            self.state.id_allocator.free(request_id);
-            (ret)(&mut self.state, Ok(response));
-        }
-    }
+    fn handle_response(&mut self, request_id: i32, response: Result<Response>) -> Result<()> {
+        let ret = self
+            .state
+            .requests
+            .remove(&request_id)
+            .ok_or(Error::RequestDoesNotExist)?;
 
-    fn handle_response_error(&mut self, request_id: i32, error: proto::Error) {
-        if let Some(ret) = self.state.requests.remove(&request_id) {
-            self.state.id_allocator.free(request_id);
-            (ret)(&mut self.state, Err(error.into()));
-        }
+        self.state.id_allocator.free(request_id);
+        (ret)(&mut self.state, response);
+
+        Ok(())
     }
 
     fn handle_socket_msg(&mut self, socket_msg: Message) -> Result<()> {
@@ -276,9 +275,9 @@ impl HranaConn {
                     ServerMsg::ResponseOk {
                         request_id,
                         response,
-                    } => self.handle_response_ok(request_id, response),
+                    } => self.handle_response(request_id, Ok(response))?,
                     ServerMsg::ResponseError { request_id, error } => {
-                        self.handle_response_error(request_id, error)
+                        self.handle_response(request_id, Err(error.into()))?
                     }
                 }
             }
