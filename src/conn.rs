@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 
-use futures::stream::{SplitSink, SplitStream};
 use futures::{Future, FutureExt, SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
@@ -21,10 +20,8 @@ use crate::proto::{
 use crate::Stream;
 
 type WebSocketStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
-type WsSink = SplitSink<WebSocketStream, tungstenite::Message>;
-type WsStream = SplitStream<WebSocketStream>;
 type HandleResponseCallback =
-    Box<dyn FnOnce(&mut HranaConnState, Result<proto::Response>) -> Result<()> + Sync + Send>;
+    Box<dyn FnOnce(&mut ConnState, Result<proto::Response>) -> Result<()> + Sync + Send>;
 
 enum StreamState {
     Open,
@@ -42,15 +39,15 @@ impl StreamState {
 }
 
 #[derive(Default)]
-struct HranaConnState {
+struct ConnState {
     streams: HashMap<i32, StreamState>,
     requests: HashMap<i32, HandleResponseCallback>,
     id_allocator: IdAllocator,
 }
 
-pub struct HranaConnFut(JoinHandle<Result<()>>);
+pub struct ConnFut(JoinHandle<Result<()>>);
 
-impl Future for HranaConnFut {
+impl Future for ConnFut {
     type Output = Result<()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -65,7 +62,7 @@ impl Future for HranaConnFut {
 pub(crate) async fn spawn_hrana_conn(
     url: &str,
     jwt: Option<String>,
-) -> Result<(mpsc::UnboundedSender<Op>, HranaConnFut)> {
+) -> Result<(mpsc::UnboundedSender<Op>, ConnFut)> {
     let mut conn = HranaConn::connect(url, jwt).await?;
     let sender = conn.sender();
     let handle = tokio::spawn(async move {
@@ -77,13 +74,12 @@ pub(crate) async fn spawn_hrana_conn(
         conn.close().await
     });
 
-    Ok((sender, HranaConnFut(handle)))
+    Ok((sender, ConnFut(handle)))
 }
 
 struct HranaConn {
-    sink: WsSink,
-    stream: WsStream,
-    state: HranaConnState,
+    ws: WebSocketStream,
+    state: ConnState,
     receiver: mpsc::UnboundedReceiver<Op>,
     sender: mpsc::UnboundedSender<Op>,
 }
@@ -103,13 +99,11 @@ impl HranaConn {
             .insert("Sec-WebSocket-Protocol", HeaderValue::from_static("hrana1"));
 
         let (ws, _) = connect_async_with_config(request, Some(get_ws_config())).await?;
-        let (sink, stream) = ws.split();
         let (sender, receiver) = mpsc::unbounded_channel();
 
         let mut this = Self {
-            sink,
-            stream,
-            state: HranaConnState::default(),
+            ws,
+            state: ConnState::default(),
             receiver,
             sender,
         };
@@ -129,7 +123,7 @@ impl HranaConn {
                 Some(op) = self.receiver.recv() => {
                     self.handle_op(op).await?;
                 },
-                Some(msg) = self.stream.next() => {
+                Some(msg) = self.ws.next() => {
                     self.handle_socket_msg(msg?)?;
                 },
                 else => break,
@@ -141,13 +135,12 @@ impl HranaConn {
 
     async fn send_client_message(&mut self, req: &ClientMsg) -> Result<()> {
         let msg_data = serde_json::to_string(req).unwrap();
-        self.sink.send(tungstenite::Message::Text(msg_data)).await?;
+        self.ws.send(tungstenite::Message::Text(msg_data)).await?;
 
         Ok(())
     }
 
     async fn handle_op_create_stream(&mut self, ret: oneshot::Sender<Stream>) -> Result<()> {
-        // TODO: better id allocation
         let stream_id = self.state.id_allocator.allocate();
         let request_id = self.state.id_allocator.allocate();
 
@@ -383,9 +376,8 @@ impl HranaConn {
         Ok(())
     }
 
-    async fn close(self) -> Result<()> {
-        let mut ws = self.sink.reunite(self.stream).unwrap();
-        ws.close(None).await?;
+    async fn close(mut self) -> Result<()> {
+        self.ws.close(None).await?;
         Ok(())
     }
 

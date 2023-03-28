@@ -1,6 +1,6 @@
 use tokio::sync::{mpsc, oneshot};
 
-use crate::conn::{spawn_hrana_conn, HranaConnFut};
+use crate::conn::{spawn_hrana_conn, ConnFut};
 use crate::error::{Error, Result};
 use crate::op::Op;
 use crate::Stream;
@@ -27,7 +27,7 @@ impl Client {
     /// // collect errors
     /// handle.await??
     /// ```
-    pub async fn connect(url: &str, jwt: Option<String>) -> Result<(Self, HranaConnFut)> {
+    pub async fn connect(url: &str, jwt: Option<String>) -> Result<(Self, ConnFut)> {
         let (conn_sender, handle) = spawn_hrana_conn(url, jwt).await?;
         Ok((Self { conn_sender }, handle))
     }
