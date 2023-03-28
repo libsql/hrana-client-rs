@@ -1,4 +1,4 @@
-pub use crate::conn::HranaConnFut as ConnFut;
+pub use crate::conn::ConnFut;
 pub use crate::stream::Stream;
 pub use client::Client;
 

@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 
-use futures::stream::{SplitSink, SplitStream};
 use futures::{Future, FutureExt, SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
@@ -21,10 +20,8 @@ use crate::proto::{
 use crate::Stream;
 
 type WebSocketStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
-type WsSink = SplitSink<WebSocketStream, tungstenite::Message>;
-type WsStream = SplitStream<WebSocketStream>;
 type HandleResponseCallback =
-    Box<dyn FnOnce(&mut HranaConnState, Result<proto::Response>) -> Result<()> + Sync + Send>;
+    Box<dyn FnOnce(&mut ConnState, Result<proto::Response>) -> Result<()> + Sync + Send>;
 
 enum StreamState {
     Open,
@@ -42,15 +39,15 @@ impl StreamState {
 }
 
 #[derive(Default)]
-struct HranaConnState {
+struct ConnState {
     streams: HashMap<i32, StreamState>,
     requests: HashMap<i32, HandleResponseCallback>,
     id_allocator: IdAllocator,
 }
 
-pub struct HranaConnFut(JoinHandle<Result<()>>);
+pub struct ConnFut(JoinHandle<Result<()>>);
 
-impl Future for HranaConnFut {
+impl Future for ConnFut {
     type Output = Result<()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -65,7 +62,7 @@ impl Future for HranaConnFut {
 pub(crate) async fn spawn_hrana_conn(
     url: &str,
     jwt: Option<String>,
-) -> Result<(mpsc::UnboundedSender<Op>, HranaConnFut)> {
+) -> Result<(mpsc::UnboundedSender<Op>, ConnFut)> {
     let mut conn = HranaConn::connect(url, jwt).await?;
     let sender = conn.sender();
     let handle = tokio::spawn(async move {
@@ -77,13 +74,12 @@ pub(crate) async fn spawn_hrana_conn(
         conn.close().await
     });
 
-    Ok((sender, HranaConnFut(handle)))
+    Ok((sender, ConnFut(handle)))
 }
 
 struct HranaConn {
-    sink: WsSink,
-    stream: WsStream,
-    state: HranaConnState,
+    ws: WebSocketStream,
+    state: ConnState,
     receiver: mpsc::UnboundedReceiver<Op>,
     sender: mpsc::UnboundedSender<Op>,
 }
@@ -103,18 +99,16 @@ impl HranaConn {
             .insert("Sec-WebSocket-Protocol", HeaderValue::from_static("hrana1"));
 
         let (ws, _) = connect_async_with_config(request, Some(get_ws_config())).await?;
-        let (sink, stream) = ws.split();
         let (sender, receiver) = mpsc::unbounded_channel();
 
         let mut this = Self {
-            sink,
-            stream,
-            state: HranaConnState::default(),
+            ws,
+            state: ConnState::default(),
             receiver,
             sender,
         };
 
-        this.send_client_message(&ClientMsg::Hello { jwt }).await?;
+        this.send_message(&ClientMsg::Hello { jwt }).await?;
 
         Ok(this)
     }
@@ -129,8 +123,8 @@ impl HranaConn {
                 Some(op) = self.receiver.recv() => {
                     self.handle_op(op).await?;
                 },
-                Some(msg) = self.stream.next() => {
-                    self.handle_socket_msg(msg?)?;
+                Some(msg) = self.ws.next() => {
+                    self.handle_socket_msg(msg?).await?;
                 },
                 else => break,
             }
@@ -139,29 +133,69 @@ impl HranaConn {
         Ok(())
     }
 
-    async fn send_client_message(&mut self, req: &ClientMsg) -> Result<()> {
+    async fn send_message(&mut self, req: &ClientMsg) -> Result<()> {
         let msg_data = serde_json::to_string(req).unwrap();
-        self.sink.send(tungstenite::Message::Text(msg_data)).await?;
+        self.ws.send(tungstenite::Message::Text(msg_data)).await?;
+
+        Ok(())
+    }
+
+    async fn send_request(
+        &mut self,
+        request: proto::Request,
+        cb: HandleResponseCallback,
+    ) -> Result<()> {
+        let request_id = self.state.id_allocator.allocate();
+        let msg = ClientMsg::Request {
+            request_id,
+            request,
+        };
+        self.send_message(&msg).await?;
+
+        self.state.requests.insert(request_id, cb);
 
         Ok(())
     }
 
     async fn handle_op_create_stream(&mut self, ret: oneshot::Sender<Stream>) -> Result<()> {
-        // TODO: better id allocation
         let stream_id = self.state.id_allocator.allocate();
-        let request_id = self.state.id_allocator.allocate();
 
-        let msg = ClientMsg::Request {
-            request_id,
-            request: proto::Request::OpenStream(OpenStreamReq { stream_id }),
-        };
+        let cb: HandleResponseCallback = Box::new(move |state, resp| {
+            let Some(state) = state.streams.get_mut(&stream_id) else { return Err(Error::StreamDoesNotExist)};
+            *state = match state {
+                StreamState::Opening { waiters } => match resp {
+                    Ok(proto::Response::OpenStream(_)) => {
+                        for waiter in waiters.drain(..) {
+                            let _ = waiter.send(Ok(()));
+                        }
+                        StreamState::Open
+                    }
+                    Ok(_) => {
+                        for waiter in waiters.drain(..) {
+                            let _ = waiter.send(Err(Error::BadResponse));
+                        }
+                        StreamState::Closed
+                    }
+                    Err(e) => {
+                        for waiter in waiters.drain(..) {
+                            let _ = waiter.send(Err(e.clone()));
+                        }
+                        StreamState::Closed
+                    }
+                },
+                StreamState::Closed | StreamState::Open => return Err(Error::InvalidState),
+            };
 
-        self.send_client_message(&msg).await?;
+            Ok(())
+        });
+
+        self.send_request(proto::Request::OpenStream(OpenStreamReq { stream_id }), cb)
+            .await?;
+
         let stream = Stream {
             stream_id,
             conn_sender: self.sender(),
         };
-
         let _ = ret.send(stream);
 
         self.state.streams.insert(
@@ -169,40 +203,6 @@ impl HranaConn {
             StreamState::Opening {
                 waiters: Vec::new(),
             },
-        );
-
-        self.state.requests.insert(
-            request_id,
-            Box::new(move |state, resp| {
-                let Some(state) = state.streams.get_mut(&stream_id) else { return Err(Error::StreamDoesNotExist)};
-                *state = match state {
-                    StreamState::Opening { waiters } => match resp {
-                        Ok(proto::Response::OpenStream(_)) => {
-                            for waiter in waiters.drain(..) {
-                                let _ = waiter.send(Ok(()));
-                            }
-                            StreamState::Open
-                        }
-                        Ok(_) => {
-                            for waiter in waiters.drain(..) {
-                                let _ = waiter.send(Err(Error::BadResponse));
-                            }
-                            StreamState::Closed
-                        }
-                        Err(e) => {
-                            for waiter in waiters.drain(..) {
-                                let _ = waiter.send(Err(e.clone()));
-                            }
-                            StreamState::Closed
-                        }
-                    },
-                    StreamState::Closed | StreamState::Open => {
-                        return Err(Error::InvalidState)
-                    }
-                };
-
-                Ok(())
-            }),
         );
 
         Ok(())
@@ -266,7 +266,7 @@ impl HranaConn {
         (ret)(&mut self.state, response)
     }
 
-    fn handle_socket_msg(&mut self, socket_msg: Message) -> Result<()> {
+    async fn handle_socket_msg(&mut self, socket_msg: Message) -> Result<()> {
         match socket_msg {
             Message::Text(json) => {
                 let server_msg: ServerMsg =
@@ -288,6 +288,10 @@ impl HranaConn {
             Message::Close(_) => {
                 return Err(Error::Shutdown);
             }
+            Message::Ping(_) => {
+                self.ws.send(Message::Pong(Vec::new())).await?;
+            }
+            Message::Pong(_) => (),
             _ => return Err(Error::InvalidServerMessage),
         }
 
@@ -317,30 +321,25 @@ impl HranaConn {
             return Ok(());
         }
 
-        let request_id = self.state.id_allocator.allocate();
-        let req = ClientMsg::Request {
-            request_id,
-            request: proto::Request::Execute(proto::ExecuteReq { stream_id, stmt }),
-        };
+        let cb: HandleResponseCallback = Box::new(move |_, resp| {
+            let res = match resp {
+                Ok(r) => match r {
+                    proto::Response::Execute(e) => Ok(e.result),
+                    _ => Err(Error::BadResponse),
+                },
+                Err(e) => Err(e),
+            };
 
-        self.send_client_message(&req).await?;
+            let _ = ret.send(res);
 
-        self.state.requests.insert(
-            request_id,
-            Box::new(move |_, resp| {
-                let res = match resp {
-                    Ok(r) => match r {
-                        proto::Response::Execute(e) => Ok(e.result),
-                        _ => Err(Error::BadResponse),
-                    },
-                    Err(e) => Err(e),
-                };
+            Ok(())
+        });
 
-                let _ = ret.send(res);
-
-                Ok(())
-            }),
-        );
+        self.send_request(
+            proto::Request::Execute(proto::ExecuteReq { stream_id, stmt }),
+            cb,
+        )
+        .await?;
 
         Ok(())
     }
@@ -360,32 +359,26 @@ impl HranaConn {
             }
         }
 
-        let request_id = self.state.id_allocator.allocate();
-        let req = ClientMsg::Request {
-            request_id,
-            request: proto::Request::CloseStream(CloseStreamReq { stream_id }),
-        };
+        let cb: HandleResponseCallback = Box::new(move |state, resp| {
+            state.streams.remove(&stream_id);
+            state.id_allocator.free(stream_id);
+            let res = resp.map(|_| ());
+            let _ = ret.send(res);
 
-        self.send_client_message(&req).await?;
+            Ok(())
+        });
 
-        self.state.requests.insert(
-            request_id,
-            Box::new(move |state, resp| {
-                state.streams.remove(&stream_id);
-                state.id_allocator.free(stream_id);
-                let res = resp.map(|_| ());
-                let _ = ret.send(res);
-
-                Ok(())
-            }),
-        );
+        self.send_request(
+            proto::Request::CloseStream(CloseStreamReq { stream_id }),
+            cb,
+        )
+        .await?;
 
         Ok(())
     }
 
-    async fn close(self) -> Result<()> {
-        let mut ws = self.sink.reunite(self.stream).unwrap();
-        ws.close(None).await?;
+    async fn close(mut self) -> Result<()> {
+        self.ws.close(None).await?;
         Ok(())
     }
 
@@ -408,30 +401,25 @@ impl HranaConn {
             return Ok(());
         }
 
-        let request_id = self.state.id_allocator.allocate();
-        let req = ClientMsg::Request {
-            request_id,
-            request: proto::Request::Batch(proto::BatchReq { stream_id, batch }),
-        };
+        let cb: HandleResponseCallback = Box::new(move |_, resp| {
+            let res = match resp {
+                Ok(r) => match r {
+                    proto::Response::Batch(e) => Ok(e.result),
+                    _ => Err(Error::BadResponse),
+                },
+                Err(e) => Err(e),
+            };
 
-        self.send_client_message(&req).await?;
+            let _ = ret.send(res);
 
-        self.state.requests.insert(
-            request_id,
-            Box::new(move |_, resp| {
-                let res = match resp {
-                    Ok(r) => match r {
-                        proto::Response::Batch(e) => Ok(e.result),
-                        _ => Err(Error::BadResponse),
-                    },
-                    Err(e) => Err(e),
-                };
+            Ok(())
+        });
 
-                let _ = ret.send(res);
-
-                Ok(())
-            }),
-        );
+        self.send_request(
+            proto::Request::Batch(proto::BatchReq { stream_id, batch }),
+            cb,
+        )
+        .await?;
 
         Ok(())
     }
