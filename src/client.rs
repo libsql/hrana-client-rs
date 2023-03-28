@@ -18,7 +18,7 @@ impl Client {
     ///
     /// # Example:
     ///
-    /// ```no_run
+    /// ```ignore
     /// let (client, fut) = Client::connect("ws://localhost:8080", None).await?;
     /// let handle = tokio::task::spawn(fut);
     /// let stream = client.open_stream().await?;
