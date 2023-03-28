@@ -12,6 +12,21 @@ pub struct Client {
 
 impl Client {
     /// Connects to the remote hrana server.
+    ///
+    /// Returns a `Client` handle, along with a `HranaConnFut` that drives the socket connection,
+    /// and needs to be awaited
+    ///
+    /// # Example:
+    ///
+    /// ```no_run
+    /// let (client, fut) = Client::connect("ws://localhost:8080", None).await?;
+    /// let handle = tokio::task::spawn(fut);
+    /// let stream = client.open_stream().await?;
+    /// // do things with stream...
+    ///
+    /// // collect errors
+    /// handle.await??
+    /// ```
     pub async fn connect(url: &str, jwt: Option<String>) -> Result<(Self, HranaConnFut)> {
         let (conn_sender, handle) = spawn_hrana_conn(url, jwt).await?;
         Ok((Self { conn_sender }, handle))
