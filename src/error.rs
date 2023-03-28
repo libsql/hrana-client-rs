@@ -6,9 +6,9 @@ use crate::proto;
 pub enum Error {
     #[error("URL is missing host")]
     MissingHost,
-    #[error("Stream closed")]
+    #[error("stream closed")]
     StreamClosed,
-    #[error("Stream doesn't exist")]
+    #[error("stream doesn't exist")]
     StreamDoesNotExist,
     #[error(transparent)]
     HranaError(#[from] proto::Error),
@@ -24,6 +24,8 @@ pub enum Error {
     Internal(String),
     #[error("{0}")]
     InvalidUrl(String),
+    #[error("received response does not match any request")]
+    RequestDoesNotExist,
 }
 
 impl From<tungstenite::Error> for Error {
