@@ -327,7 +327,7 @@ impl_from_value!(f64, Float);
 
 impl_from_value!(Vec<u8>, Blob);
 
-macro_rules! impl_value_try_from {
+macro_rules! impl_value_try_from_core {
     ($variant: ident, $typename: ty) => {
         impl TryFrom<Value> for $typename {
             type Error = String;
@@ -344,19 +344,55 @@ macro_rules! impl_value_try_from {
     };
 }
 
-impl_value_try_from!(Text, String);
+macro_rules! impl_value_try_from_pod {
+    ($variant: ident, $typename: ty) => {
+        impl_value_try_from_core!($variant, $typename);
 
-impl_value_try_from!(Integer, i8);
-impl_value_try_from!(Integer, i16);
-impl_value_try_from!(Integer, i32);
-impl_value_try_from!(Integer, i64);
-impl_value_try_from!(Integer, u8);
-impl_value_try_from!(Integer, u16);
-impl_value_try_from!(Integer, u32);
-impl_value_try_from!(Integer, u64);
-impl_value_try_from!(Integer, usize);
-impl_value_try_from!(Integer, isize);
+        impl TryFrom<&Value> for $typename {
+            type Error = String;
+            fn try_from(v: &Value) -> Result<$typename, Self::Error> {
+                match v {
+                    Value::$variant { value: v } => (*v).try_into().map_err(|e| format!("{e}")),
+                    other => Err(format!(
+                        "cannot transform {other:?} to {}",
+                        stringify!($variant)
+                    )),
+                }
+            }
+        }
+    };
+}
 
-impl_value_try_from!(Float, f64);
+macro_rules! impl_value_try_from_ref {
+    ($variant: ident, $typename: ty, $reftype: ty) => {
+        impl_value_try_from_core!($variant, $typename);
 
-impl_value_try_from!(Blob, Vec<u8>);
+        impl<'a> TryFrom<&'a Value> for &'a $reftype {
+            type Error = String;
+            fn try_from(v: &'a Value) -> Result<&'a $reftype, Self::Error> {
+                match v {
+                    Value::$variant { value: v } => Ok(v),
+                    other => Err(format!(
+                        "cannot transform {other:?} to {}",
+                        stringify!($variant)
+                    )),
+                }
+            }
+        }
+    };
+}
+
+impl_value_try_from_pod!(Integer, i8);
+impl_value_try_from_pod!(Integer, i16);
+impl_value_try_from_pod!(Integer, i32);
+impl_value_try_from_pod!(Integer, i64);
+impl_value_try_from_pod!(Integer, u8);
+impl_value_try_from_pod!(Integer, u16);
+impl_value_try_from_pod!(Integer, u32);
+impl_value_try_from_pod!(Integer, u64);
+impl_value_try_from_pod!(Integer, usize);
+impl_value_try_from_pod!(Integer, isize);
+impl_value_try_from_pod!(Float, f64);
+
+impl_value_try_from_ref!(Text, String, str);
+impl_value_try_from_ref!(Blob, Vec<u8>, [u8]);
