@@ -309,6 +309,19 @@ impl_from_value!(u8, Integer);
 impl_from_value!(u16, Integer);
 impl_from_value!(u32, Integer);
 
+// rust doesn't like usize.into() for i64, so do it manually.
+impl From<usize> for Value {
+    fn from(t: usize) -> Value {
+        Value::Integer { value: t as _ }
+    }
+}
+
+impl From<isize> for Value {
+    fn from(t: isize) -> Value {
+        Value::Integer { value: t as _ }
+    }
+}
+
 impl_from_value!(f32, Float);
 impl_from_value!(f64, Float);
 
@@ -341,6 +354,8 @@ impl_value_try_from!(Integer, u8);
 impl_value_try_from!(Integer, u16);
 impl_value_try_from!(Integer, u32);
 impl_value_try_from!(Integer, u64);
+impl_value_try_from!(Integer, usize);
+impl_value_try_from!(Integer, isize);
 
 impl_value_try_from!(Float, f64);
 
