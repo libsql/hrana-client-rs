@@ -19,7 +19,7 @@ pub struct ServerMsg {
 #[derive(Serialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamRequest {
-    CloseStream,
+    Close,
     Execute(StreamExecuteReq),
     Batch(StreamBatchReq),
     // TODO: implement
@@ -59,7 +59,7 @@ pub struct StreamResponseError {
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamResponse {
-    CloseStream,
+    Close,
     Execute(StreamExecuteResult),
     Batch(StreamBatchResult),
     // TODO: implement
