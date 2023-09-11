@@ -30,6 +30,10 @@ pub enum Error {
     RequestDoesNotExist,
     #[error("connection state is invalid")]
     InvalidState,
+    #[error("invalid URI: {0}")]
+    InvalidUri(#[from] Arc<hyper::http::uri::InvalidUri>),
+    #[error("connect error: {0}")]
+    Connect(Arc<dyn std::error::Error + Send + Sync + 'static>),
 }
 
 impl From<tungstenite::Error> for Error {

@@ -1,7 +1,4 @@
-use hrana_client::{
-    proto::Stmt,
-    Client,
-};
+use hrana_client::{proto::Stmt, Client};
 
 #[tokio::main]
 async fn main() {
@@ -22,8 +19,14 @@ async fn main() {
         None,
         Stmt::new("CREATE TABLE IF NOT EXISTS test (id INT, name TEXT)", true),
     );
-    batch.step(None, Stmt::new("INSERT INTO test (id, name) VALUES (1, 2)", true));
-    batch.step(None, Stmt::new("INSERT INTO test (id, name) VALUES (2, 3)", true));
+    batch.step(
+        None,
+        Stmt::new("INSERT INTO test (id, name) VALUES (1, 2)", true),
+    );
+    batch.step(
+        None,
+        Stmt::new("INSERT INTO test (id, name) VALUES (2, 3)", true),
+    );
     batch.step(None, Stmt::new("SELECT * FROM test", true));
 
     let resp = stream.execute_batch(batch).await.unwrap();
