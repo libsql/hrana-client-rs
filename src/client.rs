@@ -1,4 +1,7 @@
+use hyper::Uri;
+use hyper::client::HttpConnector;
 use tokio::sync::{mpsc, oneshot};
+use tower::make::MakeConnection;
 
 use crate::conn::{spawn_hrana_conn, ConnFut};
 use crate::error::{Error, Result};
@@ -28,7 +31,18 @@ impl Client {
     /// handle.await??
     /// ```
     pub async fn connect(url: &str, jwt: Option<String>) -> Result<(Self, ConnFut)> {
-        let (conn_sender, handle) = spawn_hrana_conn(url, jwt).await?;
+        let connector = HttpConnector::new();
+        Self::with_connector(url, jwt, connector).await
+    }
+
+    /// Same as connect, uses the provided `connector` to create connection instead of a tokio::net::TcpStream
+    pub async fn with_connector<M>(url: &str, jwt: Option<String>, connector: M) -> Result<(Self, ConnFut)>
+    where
+        M: MakeConnection<Uri>,
+        M::Connection: Send + 'static + Unpin,
+        M::Error: std::error::Error + Sync + Send + 'static,
+    {
+        let (conn_sender, handle) = spawn_hrana_conn(url, jwt, connector).await?;
         Ok((Self { conn_sender }, handle))
     }
 

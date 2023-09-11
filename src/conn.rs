@@ -1,15 +1,20 @@
 use std::collections::HashMap;
+use std::future::poll_fn;
 use std::pin::Pin;
+use std::str::FromStr;
+use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 
 use futures::{Future, FutureExt, SinkExt, StreamExt};
-use tokio::net::TcpStream;
+use hyper::Uri;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::{self, Message};
-use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream};
+use tokio_tungstenite::{client_async_tls_with_config, MaybeTlsStream};
+use tower::make::MakeConnection;
 
 use crate::error::{Error, Result};
 use crate::id_alloc::IdAllocator;
@@ -19,7 +24,7 @@ use crate::proto::{
 };
 use crate::Stream;
 
-type WebSocketStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
+type WebSocketStream<S> = tokio_tungstenite::WebSocketStream<MaybeTlsStream<S>>;
 type HandleResponseCallback =
     Box<dyn FnOnce(&mut ConnState, Result<proto::Response>) -> Result<()> + Sync + Send>;
 
@@ -59,11 +64,24 @@ impl Future for ConnFut {
     }
 }
 
-pub(crate) async fn spawn_hrana_conn(
+pub(crate) async fn spawn_hrana_conn<M>(
     url: &str,
     jwt: Option<String>,
-) -> Result<(mpsc::UnboundedSender<Op>, ConnFut)> {
-    let mut conn = HranaConn::connect(url, jwt).await?;
+    mut make_conn: M,
+) -> Result<(mpsc::UnboundedSender<Op>, ConnFut)>
+where
+    M: MakeConnection<Uri>,
+    M::Connection: Send + 'static + Unpin,
+    M::Error: std::error::Error + Sync + Send + 'static,
+{
+    poll_fn(|cx| make_conn.poll_ready(cx))
+        .await
+        .map_err(|e| Error::Connect(Arc::new(e)))?;
+    let stream = make_conn
+        .make_connection(Uri::from_str(url).map_err(Arc::new)?)
+        .await
+        .map_err(|e| Error::Connect(Arc::new(e)))?;
+    let mut conn = HranaConn::connect(stream, url, jwt).await?;
     let sender = conn.sender();
     let handle = tokio::spawn(async move {
         match conn.run().await {
@@ -77,8 +95,8 @@ pub(crate) async fn spawn_hrana_conn(
     Ok((sender, ConnFut(handle)))
 }
 
-struct HranaConn {
-    ws: WebSocketStream,
+struct HranaConn<S> {
+    ws: WebSocketStream<S>,
     state: ConnState,
     receiver: mpsc::UnboundedReceiver<Op>,
     sender: mpsc::UnboundedSender<Op>,
@@ -91,14 +109,21 @@ fn get_ws_config() -> tungstenite::protocol::WebSocketConfig {
     }
 }
 
-impl HranaConn {
-    pub(crate) async fn connect(url: &str, jwt: Option<String>) -> Result<Self> {
+impl<S> HranaConn<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    pub(crate) async fn connect(stream: S, url: &str, jwt: Option<String>) -> Result<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
         let mut request = url.into_client_request()?;
         request
             .headers_mut()
             .insert("Sec-WebSocket-Protocol", HeaderValue::from_static("hrana1"));
 
-        let (ws, _) = connect_async_with_config(request, Some(get_ws_config())).await?;
+        let (ws, _) =
+            client_async_tls_with_config(request, stream, Some(get_ws_config()), None).await?;
         let (sender, receiver) = mpsc::unbounded_channel();
 
         let mut this = Self {
